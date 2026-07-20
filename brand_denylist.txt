@@ -1,0 +1,39 @@
+# Brand / trademark denylist used to flag possible IP violations in
+# titles and keywords (Shutterstock rejects commercial content that names
+# brands or products). This is a starter list, not exhaustive — add to it
+# as you notice brands showing up in your own photo batches (logos on
+# products, cars, electronics, clothing, etc.). One name per line,
+# case-insensitive, matched as a substring.
+nike
+adidas
+apple
+iphone
+samsung
+coca-cola
+coke
+pepsi
+starbucks
+mcdonald's
+mcdonalds
+sony
+nintendo
+disney
+marvel
+gucci
+louis vuitton
+puma
+reebok
+under armour
+tesla
+bmw
+mercedes
+toyota
+honda
+ford
+chevrolet
+google
+microsoft
+amazon
+facebook
+instagram
+netflix
