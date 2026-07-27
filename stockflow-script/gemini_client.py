@@ -3,10 +3,10 @@ Thin wrapper around the Gemini API for a single image -> metadata call.
 Isolated in its own module so the prompt, schema, and retry logic can be
 tuned without touching the batch-processing loop in stockflow.py.
 """
-import base64
 import io
 import time
 
+from google.genai import types
 from pydantic import BaseModel, Field
 from PIL import Image
 
@@ -85,27 +85,44 @@ def generate_metadata(
     """
     image_bytes, mime_type = _prepare_image_bytes(image_path)
     prompt = PROMPT_TEMPLATE.format(categories="\n".join(f"- {c}" for c in valid_categories))
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
     last_error = None
     for attempt in range(max_retries):
         try:
-            interaction = client.interactions.create(
-                model=GEMINI_MODEL,
-                input=[
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image",
-                        "data": base64.b64encode(image_bytes).decode("utf-8"),
-                        "mime_type": mime_type,
+            if hasattr(client, "models") and hasattr(client.models, "generate_content"):
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=[image_part, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=Metadata,
+                    ),
+                )
+                raw_text = response.text
+            elif hasattr(client, "interactions"):
+                import base64
+                interaction = client.interactions.create(
+                    model=GEMINI_MODEL,
+                    input=[
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(image_bytes).decode("utf-8"),
+                            "mime_type": mime_type,
+                        },
+                    ],
+                    response_format={
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": Metadata.model_json_schema(),
                     },
-                ],
-                response_format={
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": Metadata.model_json_schema(),
-                },
-            )
-            return Metadata.model_validate_json(interaction.output_text)
+                )
+                raw_text = interaction.output_text
+            else:
+                raise AttributeError("Client API structure not recognized")
+
+            return Metadata.model_validate_json(raw_text)
         except Exception as e:  # noqa: BLE001 - want to retry on anything transient
             last_error = e
             if attempt < max_retries - 1:

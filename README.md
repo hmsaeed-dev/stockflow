@@ -1,80 +1,96 @@
-# StockFlow (Phase 1)
+# Shutterstock Contributor AI Automation Pipeline 📸🤖
 
-AI metadata generation for Shutterstock contributor photo submissions.
-Points at a folder of photos, asks Gemini for a title/keywords/category
-per image, validates the result, and writes a CSV ready for
-Shutterstock's bulk metadata import.
+An end-to-end AI automation suite for **Shutterstock Contributor** photo submissions powered by **Google Gemini Vision**.
 
-## Setup
+---
 
+## 🔄 Two-Step Sequential Pipeline
+
+To prepare your photos for Shutterstock upload, run the two tools **in sequence**:
+
+```
+[ Raw Camera Photos ]
+         │
+         ▼
+ ┌──────────────────────────────┐
+ │  STEP 1: AI Visual Renamer   │  ---> Renames images to descriptive SEO slugs
+ │  (image-file-rename-script)  │       (e.g., cherry_blossom_rain_droplets.jpg)
+ └──────────────┬───────────────┘
+                │
+                ▼
+ ┌──────────────────────────────┐
+ │  STEP 2: AI Metadata Generator│ ---> Generates upload-ready Shutterstock CSV
+ │     (stockflow-script)       │       (Filename, Description, Keywords, Categories)
+ └──────────────┬───────────────┘
+                │
+                ▼
+  [ Shutterstock Bulk Import CSV ]
+```
+
+---
+
+## 📁 Repository Structure
+
+* **[`image-file-rename-script/`](./image-file-rename-script)** — **Step 1 Tool**: Visually analyzes photo content and renames files to clean snake_case SEO slugs using Gemini AI Vision.
+* **[`stockflow-script/`](./stockflow-script)** — **Step 2 Tool**: Generates Shutterstock-compliant titles, 20-40 keywords, categories, and runs safety validation checks.
+
+---
+
+## ⚡ Quickstart Guide
+
+### 1. Installation
+Clone this repository and install the shared dependencies:
 ```bash
+git clone https://github.com/your-username/shutterstock-ai-automation.git
+cd shutterstock-ai-automation
 pip install -r requirements.txt
-export GEMINI_API_KEY=your-key-here   # get one at https://aistudio.google.com/apikey
 ```
 
-## Usage
+### 2. Configure API Key
+Copy `.env.example` to `.env` in the project root and add your [Gemini API Key](https://aistudio.google.com/apikey):
+```bash
+cp .env.example .env
+```
+Inside `.env`:
+```ini
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+---
+
+## 🚀 Execution Guide
+
+### STEP 1: Rename Photos with AI Vision
+Before generating metadata, rename your raw photos so their filenames are descriptive and standardized:
 
 ```bash
-python stockflow.py /path/to/photo/folder
+cd image-file-rename-script
+
+# Preview proposed AI names (Dry Run - no disk changes)
+python rename.py /path/to/your/photos --dry-run
+
+# Perform actual AI renaming
+python rename.py /path/to/your/photos
 ```
 
-By default this writes `stockflow_output.csv` in the current directory.
-To choose a different output path:
+### STEP 2: Generate Shutterstock Metadata CSV
+Once your photos are renamed, generate the Shutterstock bulk metadata CSV:
 
 ```bash
-python stockflow.py /path/to/photo/folder -o my_batch.csv
+cd ../stockflow-script
+
+# Generate bulk import CSV
+python stockflow.py /path/to/your/photos -o stockflow_output.csv
 ```
 
-Supported input formats: JPEG, PNG, WEBP, TIFF. (TIFF files are
-converted to JPEG in memory before being sent to Gemini, since Gemini's
-image-understanding endpoint doesn't accept TIFF directly — Shutterstock
-still gets the original TIFF file when you upload it separately; this
-tool only ever reads it, never modifies it.)
+Now upload your renamed photos to Shutterstock via FTP/Web, and import `stockflow_output.csv` into the Shutterstock Contributor Catalog Manager!
 
-## Output format
+---
 
-`stockflow_output.csv` has five columns:
+## 🛡️ Safety & Features
 
-| Column | Notes |
-|---|---|
-| `Filename` | Exact match to the image file's name |
-| `Description` | The generated title |
-| `Keywords` | Comma-separated, in one cell |
-| `Categories` | One or two, comma-separated, in one cell |
-| `Needs Review` | Empty if the row passed validation; otherwise a semicolon-separated list of reasons |
-
-The first four columns are what Shutterstock's bulk import expects.
-Drop the `Needs Review` column before import, or just review/delete
-those rows first — either way, filter on that column to find what needs
-a human look before you skim the rest.
-
-## Editing the rules
-
-Two things are designed to be edited without touching any code:
-
-- **`config/categories.txt`** — the valid Shutterstock category list.
-  If Shutterstock adds, renames, or removes a category, edit this file.
-- **`config/brand_denylist.txt`** — words that get a row flagged for a
-  manual brand-name check. This is a starter list, not exhaustive — add
-  to it as you notice brands showing up in your own photos.
-
-Numeric limits (min/max keywords, title length) live in `limits.py` as
-named constants, not scattered through the code.
-
-## Known limitations (Phase 1)
-
-- **Brand-name check is a naive substring match.** It will have false
-  positives on words that are also brand names (e.g. "apple" the fruit
-  vs. Apple the company, "puma" the animal vs. Puma the brand). That's
-  intentional — it only ever flags for manual review, never auto-removes
-  anything, so a false positive just costs you one glance at that row.
-- **No cost/rate-limit handling beyond basic retry.** Each image is
-  processed one at a time with exponential backoff on failure (3
-  attempts). For large batches, watch your Gemini API quota — see
-  PRD §8.
-- **Title length limit is stricter than Shutterstock's own.**
-  Shutterstock allows up to 2048 characters, but this tool flags
-  anything over 200, since a 2000-character "title" is a bad stock photo
-  title even if Shutterstock would technically accept it.
-- Video, vector/illustration files, and multi-agency support are
-  explicitly out of scope for this phase — see the PRD's Non-goals.
+* **Visual AI Recognition**: Uses Gemini Vision to see physical photo contents.
+* **Non-Destructive Dry Run**: Preview proposed changes before committing to disk.
+* **1-Click Undo**: `rename.py` writes a `rename_mapping.json` log to allow instant rollback (`--undo`).
+* **Brand Denylist Safety**: Automatically flags trademark/brand names to protect commercial submission approval.
+* **Shutterstock CSV Standard**: Exports standard `Filename, Description, Keywords, Categories, Illustration, Mature Content, Editorial, Needs Review` CSV columns.

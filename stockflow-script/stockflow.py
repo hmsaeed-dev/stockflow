@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-StockFlow — Phase 1: AI metadata generation for Shutterstock contributor
-submissions.
+StockFlow — AI metadata generation for Shutterstock contributor photo submissions.
 
 Usage:
     export GEMINI_API_KEY=your-key-here
@@ -12,7 +11,7 @@ keyword list, and category suggestion for each one, validates the result
 against Shutterstock's rules and StockFlow's own quality bar, and writes
 everything to a CSV in Shutterstock's bulk metadata import format:
 
-    Filename,Description,Keywords,Categories,Needs Review
+    Filename,Description,Keywords,Categories,Illustration,Mature Content,Editorial,Needs Review
 
 A row that fails validation is still written (never dropped), with the
 failure reasons in the Needs Review column so it's easy to filter and
@@ -24,11 +23,31 @@ import os
 import sys
 from pathlib import Path
 
+# Add project directory to sys.path for robust module imports
+project_root = Path(__file__).resolve().parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from google import genai
 
 from limits import SUPPORTED_EXTENSIONS
 from gemini_client import generate_metadata
 from validation import load_categories, load_brand_denylist, validate_row
+
+
+def load_env_file(root_dir: Path) -> None:
+    """Helper to auto-load GEMINI_API_KEY from .env if present."""
+    for env_path in [root_dir / ".env", root_dir.parent / ".env", Path.cwd() / ".env"]:
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'\"")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+            break
 
 
 def find_images(folder: Path) -> list[Path]:
@@ -38,16 +57,18 @@ def find_images(folder: Path) -> list[Path]:
     )
 
 
-def process_folder(folder: Path, output_path: Path, project_root: Path) -> None:
+def process_folder(folder: Path, output_path: Path, root_dir: Path) -> None:
+    load_env_file(root_dir)
+
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("ERROR: set the GEMINI_API_KEY environment variable first.", file=sys.stderr)
+        print("ERROR: GEMINI_API_KEY is not set. Set it as an environment variable or inside .env file.", file=sys.stderr)
         sys.exit(1)
 
-    valid_categories = load_categories(str(project_root))
-    brand_denylist = load_brand_denylist(str(project_root))
+    valid_categories = load_categories(str(root_dir))
+    brand_denylist = load_brand_denylist(str(root_dir))
     if not valid_categories:
-        print(f"ERROR: no categories loaded from {project_root / 'config/categories.txt'}",
+        print(f"ERROR: no categories loaded from {root_dir / 'config/categories.txt'}",
               file=sys.stderr)
         sys.exit(1)
 
@@ -65,7 +86,10 @@ def process_folder(folder: Path, output_path: Path, project_root: Path) -> None:
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Filename", "Description", "Keywords", "Categories", "Needs Review"])
+        writer.writerow([
+            "Filename", "Description", "Keywords", "Categories",
+            "Illustration", "Mature Content", "Editorial", "Needs Review"
+        ])
 
         for i, image_path in enumerate(images, start=1):
             print(f"[{i}/{total}] {image_path.name} ... ", end="", flush=True)
@@ -75,7 +99,7 @@ def process_folder(folder: Path, output_path: Path, project_root: Path) -> None:
                 )
             except Exception as e:  # noqa: BLE001 - keep the batch going
                 print(f"FAILED ({e})")
-                writer.writerow([image_path.name, "", "", "", f"generation failed: {e}"])
+                writer.writerow([image_path.name, "", "", "", "No", "No", "No", f"generation failed: {e}"])
                 failed_count += 1
                 continue
 
@@ -88,6 +112,9 @@ def process_folder(folder: Path, output_path: Path, project_root: Path) -> None:
                 metadata.title,
                 ", ".join(metadata.keywords),
                 ", ".join(metadata.categories),
+                "No",
+                "No",
+                "No",
                 "; ".join(reasons),
             ])
 
@@ -114,7 +141,6 @@ def main():
         print(f"ERROR: {args.folder} is not a folder", file=sys.stderr)
         sys.exit(1)
 
-    project_root = Path(__file__).resolve().parent
     process_folder(args.folder, args.output, project_root)
 
 

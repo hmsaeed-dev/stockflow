@@ -16,11 +16,19 @@ from limits import (
 )
 
 
-def load_word_list(path: str) -> set[str]:
+def load_word_list(path: str, project_root: str = ".") -> set[str]:
     """Load a config file of one entry per line, skipping blanks and comments."""
     p = Path(path)
+    if not p.is_absolute():
+        p = Path(project_root) / path
+
     if not p.exists():
-        return set()
+        alt_p = Path(project_root) / Path(path).name
+        if alt_p.exists():
+            p = alt_p
+        else:
+            return set()
+
     words = set()
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -31,11 +39,11 @@ def load_word_list(path: str) -> set[str]:
 
 
 def load_categories(project_root: str = ".") -> set[str]:
-    return load_word_list(str(Path(project_root) / CATEGORIES_FILE))
+    return load_word_list(CATEGORIES_FILE, project_root)
 
 
 def load_brand_denylist(project_root: str = ".") -> set[str]:
-    return load_word_list(str(Path(project_root) / BRAND_DENYLIST_FILE))
+    return load_word_list(BRAND_DENYLIST_FILE, project_root)
 
 
 def validate_row(
@@ -76,9 +84,13 @@ def validate_row(
             if cat.lower() not in valid_categories:
                 reasons.append(f"category '{cat}' not in category config")
 
-    # Brand-name check across title + keywords
+    # Brand-name check across title + keywords (using word boundaries to avoid false positives)
+    import re
     haystack = " ".join([title] + keywords).lower()
-    hit_brands = sorted({b for b in brand_denylist if b in haystack})
+    hit_brands = sorted({
+        b for b in brand_denylist
+        if re.search(r"\b" + re.escape(b) + r"\b", haystack)
+    })
     if hit_brands:
         reasons.append(f"possible brand name(s): {', '.join(hit_brands)}")
 
