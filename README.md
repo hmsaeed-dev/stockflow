@@ -1,4 +1,4 @@
-# Shutterstock Contributor AI Automation Pipeline 📸🤖
+# Shutterstock Contributor AI Automation Pipeline
 
 An end-to-end AI automation suite for **Shutterstock Contributor** photo submissions powered by **Google Gemini Vision**.
 
@@ -18,10 +18,10 @@ To prepare your photos for Shutterstock upload, run the two tools **in sequence*
  └──────────────┬───────────────┘
                 │
                 ▼
- ┌──────────────────────────────┐
+ ┌───────────────────────────────┐
  │  STEP 2: AI Metadata Generator│ ---> Generates upload-ready Shutterstock CSV
- │     (stockflow-script)       │       (Filename, Description, Keywords, Categories)
- └──────────────┬───────────────┘
+ │     (stockflow-script)        │       (Filename, Description, Keywords, Categories)
+ └──────────────┬────────────────┘
                 │
                 ▼
   [ Shutterstock Bulk Import CSV ]
@@ -39,7 +39,9 @@ To prepare your photos for Shutterstock upload, run the two tools **in sequence*
 ## ⚡ Quickstart Guide
 
 ### 1. Installation
+
 Clone this repository and install the shared dependencies:
+
 ```bash
 git clone https://github.com/your-username/shutterstock-ai-automation.git
 cd shutterstock-ai-automation
@@ -47,11 +49,15 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure API Key
+
 Copy `.env.example` to `.env` in the project root and add your [Gemini API Key](https://aistudio.google.com/apikey):
+
 ```bash
 cp .env.example .env
 ```
+
 Inside `.env`:
+
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
@@ -61,6 +67,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 ## 🚀 Execution Guide
 
 ### STEP 1: Rename Photos with AI Vision
+
 Before generating metadata, rename your raw photos so their filenames are descriptive and standardized:
 
 ```bash
@@ -74,6 +81,7 @@ python rename.py /path/to/your/photos
 ```
 
 ### STEP 2: Generate Shutterstock Metadata CSV
+
 Once your photos are renamed, generate the Shutterstock bulk metadata CSV:
 
 ```bash
