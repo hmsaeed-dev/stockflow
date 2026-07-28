@@ -1,12 +1,11 @@
-# Shutterstock Contributor AI Automation Pipeline
 
-An end-to-end AI automation suite for **Shutterstock Contributor** photo submissions powered by **Google Gemini Vision**.
+# Image Metadata Automation
+
+An end-to-end AI automation suite for **image metadata** powered by **Google Gemini Vision**.
 
 ---
 
-## 🔄 Two-Step Sequential Pipeline
-
-To prepare your photos for Shutterstock upload, run the two tools **in sequence**:
+## 🔄 Two-Step Sequence
 
 ```
 [ Raw Camera Photos ]
@@ -32,7 +31,7 @@ To prepare your photos for Shutterstock upload, run the two tools **in sequence*
 ## 📁 Repository Structure
 
 * **[`image-file-rename-script/`](./image-file-rename-script)** — **Step 1 Tool**: Visually analyzes photo content and renames files to clean snake_case SEO slugs using Gemini AI Vision.
-* **[`stockflow-script/`](./stockflow-script)** — **Step 2 Tool**: Generates Shutterstock-compliant titles, 20-40 keywords, categories, and runs safety validation checks.
+* **[`stockflow-script/`](./stockflow-script)** — **Step 2 Tool**: Generates titles, 20-40 keywords, categories, and runs safety validation checks.
 
 ---
 
@@ -80,7 +79,7 @@ python rename.py /path/to/your/photos --dry-run
 python rename.py /path/to/your/photos
 ```
 
-### STEP 2: Generate Shutterstock Metadata CSV
+### STEP 2: Generate Metadata CSV
 
 Once your photos are renamed, generate the Shutterstock bulk metadata CSV:
 
@@ -101,4 +100,4 @@ Now upload your renamed photos to Shutterstock via FTP/Web, and import `stockflo
 * **Non-Destructive Dry Run**: Preview proposed changes before committing to disk.
 * **1-Click Undo**: `rename.py` writes a `rename_mapping.json` log to allow instant rollback (`--undo`).
 * **Brand Denylist Safety**: Automatically flags trademark/brand names to protect commercial submission approval.
-* **Shutterstock CSV Standard**: Exports standard `Filename, Description, Keywords, Categories, Illustration, Mature Content, Editorial, Needs Review` CSV columns.
+* **CSV Standard**: Exports standard `Filename, Description, Keywords, Categories, Illustration, Mature Content, Editorial, Needs Review` CSV columns.
