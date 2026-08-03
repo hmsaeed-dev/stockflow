@@ -44,23 +44,10 @@ script_dir = Path(__file__).resolve().parent
 if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
 
-from google import genai
-try:
-    from google.genai import errors
-    GEMINI_ERRORS = (RuntimeError, errors.APIError, errors.ClientError, Exception)
-except ImportError:
-    GEMINI_ERRORS = (RuntimeError, Exception)
-
-from gemini_namer import suggest_image_name
-
-# File extensions supported by this tool
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
-
-
 def load_env_file(root_dir: Path) -> None:
     """
-    Auto-load GEMINI_API_KEY from .env if present.
-    
+    Auto-load GEMINI_API_KEY and GEMINI_MODEL from .env if present.
+
     Checks current folder, parent folder, and working directory for a .env file,
     parsing key=value pairs into os.environ.
     """
@@ -77,10 +64,28 @@ def load_env_file(root_dir: Path) -> None:
             break
 
 
+# Load environment variables before importing dependent modules
+load_env_file(script_dir)
+
+from google import genai
+try:
+    from google.genai import errors
+    GEMINI_ERRORS = (RuntimeError, errors.APIError, errors.ClientError, Exception)
+except ImportError:
+    GEMINI_ERRORS = (RuntimeError, Exception)
+
+from gemini_namer import suggest_image_name
+
+# File extensions supported by this tool
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+
+
+
+
 def find_images(folder: Path, recursive: bool = False) -> list[Path]:
     """
     Find supported image files in target folder.
-    
+
     Returns a sorted list of Path objects for all matching image files.
     """
     glob_fn = folder.rglob if recursive else folder.glob
@@ -93,7 +98,7 @@ def find_images(folder: Path, recursive: bool = False) -> list[Path]:
 def normalize_extension(ext: str) -> str:
     """
     Standardize extensions for cleaner file naming.
-    
+
     Converts .jpeg to .jpg and .tiff to .tif.
     """
     lower = ext.lower()
@@ -107,7 +112,7 @@ def normalize_extension(ext: str) -> str:
 def undo_renames(mapping_file: Path, dry_run: bool = False) -> None:
     """
     Undo renames using a saved JSON mapping log (rename_mapping.json).
-    
+
     Iterates through recorded original -> target mappings in reverse order
     to restore original filenames safely.
     """
@@ -188,7 +193,7 @@ def batch_rename_images(
         try:
             # 4a. Call Gemini AI Vision module for descriptive name slug
             raw_slug = suggest_image_name(client, image_path)
-            
+
             # 4b. Format separator if user specified kebab-case (-) instead of default (_)
             if separator != "_":
                 raw_slug = raw_slug.replace("_", separator)
@@ -221,9 +226,9 @@ def batch_rename_images(
             print(f"FAILED ({err})")
             proposed_renames.append((image_path, image_path))
 
-        # Free tier rate-limiting: Sleep 4s between requests to stay under 15 requests per minute limit
+        # Free tier rate-limiting: Sleep 5s between requests to stay under 15 requests per minute limit
         if idx < total:
-            time.sleep(4)
+            time.sleep(5)
 
     print("=" * 70)
     changed_count = sum(1 for src, dst in proposed_renames if src != dst)

@@ -21,7 +21,9 @@ import argparse
 import csv
 import os
 import sys
+import time
 from pathlib import Path
+
 
 # Add project directory to sys.path for robust module imports
 project_root = Path(__file__).resolve().parent
@@ -124,6 +126,11 @@ def process_folder(folder: Path, output_path: Path, root_dir: Path) -> None:
             else:
                 ok_count += 1
                 print("ok")
+
+            # Free tier rate-limiting: Sleep 4s between requests to stay under RPM limit
+            if i < total:
+                time.sleep(4)
+
 
     print()
     print(f"Done. {ok_count} clean, {flagged_count} flagged for review, "

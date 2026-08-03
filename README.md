@@ -1,4 +1,3 @@
-
 # Image Metadata Automation
 
 An end-to-end AI automation suite for **image metadata** powered by **Google Gemini Vision**.
@@ -41,11 +40,12 @@ An end-to-end AI automation suite for **image metadata** powered by **Google Gem
 
 Clone this repository and install the shared dependencies:
 
-```bash
-git clone https://github.com/your-username/shutterstock-ai-automation.git
-cd shutterstock-ai-automation
-pip install -r requirements.txt
-```
+* [ ]
+  ```bash
+  git clone https://github.com/your-username/shutterstock-ai-automation.git
+  cd shutterstock-ai-automation
+  pip install -r requirements.txt
+  ```
 
 ### 2. Configure API Key
 

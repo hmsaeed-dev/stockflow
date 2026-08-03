@@ -46,7 +46,7 @@ Rules:
 def sanitize_slug(raw_slug: str) -> str:
     """
     Sanitize raw AI output text into a clean snake_case slug.
-    
+
     Removes special characters, converts spaces/dashes to underscores,
     and eliminates duplicate underscores.
     """
@@ -64,12 +64,12 @@ def sanitize_slug(raw_slug: str) -> str:
 def prepare_image_bytes(image_path: Path) -> tuple[bytes, str]:
     """
     Prepare image binary data and MIME type for Gemini API.
-    
+
     TIFF/TIF files are converted to JPEG in memory using PIL/Pillow
     because Gemini Vision API expects standard web format bytes.
     """
     lower = image_path.name.lower()
-    
+
     # Check for TIFF formats requiring PIL conversion
     if lower.endswith((".tif", ".tiff")):
         with Image.open(image_path) as img:
@@ -87,19 +87,38 @@ def prepare_image_bytes(image_path: Path) -> tuple[bytes, str]:
     return data, "image/jpeg"
 
 
+def extract_retry_delay(err: Exception) -> float | None:
+    """
+    Extract recommended retry delay in seconds from Gemini API error message.
+    Looks for pattern like 'retry in 37.582578561s' or 'retryDelay': '37s'.
+    """
+    err_str = str(err)
+    match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 1.5
+    match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s?['\"]", err_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 1.5
+    return None
+
+
 def suggest_image_name(
     client: genai.Client,
     image_path: Path,
-    model_name: str = DEFAULT_MODEL,
-    max_retries: int = 3,
+    model_name: str | None = None,
+    max_retries: int = 5,
 ) -> str:
     """
     Analyze an image with Gemini Vision and return an AI-generated filename slug.
-    
+
     - Encapsulates image data into a Gemini Part object.
     - Requests structured JSON matching ImageNameSuggestion schema.
-    - Retries automatically with exponential backoff in case of transient API errors.
+    - Retries automatically with exponential backoff and rate limit handling on API errors.
     """
+    if model_name is None:
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+
     # Step 1: Extract bytes and detect appropriate MIME type
     image_bytes, mime_type = prepare_image_bytes(image_path)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
@@ -118,14 +137,23 @@ def suggest_image_name(
             )
             # Step 3: Validate JSON response against Pydantic schema
             parsed = ImageNameSuggestion.model_validate_json(response.text)
-            
+
             # Step 4: Sanitize and return final slug
             return sanitize_slug(parsed.name_slug)
         except Exception as e:
             last_error = e
-            # Exponential backoff delay: 1s, 2s, 4s...
+            err_str = str(e)
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                # Handle rate limits / 429 quota exhaustion specifically
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    delay = extract_retry_delay(e)
+                    if delay is None:
+                        delay = max(40.0, 5.0 * (2 ** attempt))
+                    print(f"\n[Rate Limit 429] Waiting {delay:.1f}s for quota reset before retrying (attempt {attempt + 1}/{max_retries})... ", end="", flush=True)
+                    time.sleep(delay)
+                else:
+                    time.sleep(2 ** attempt)
 
     raise RuntimeError(f"Gemini AI visual analysis failed after {max_retries} attempts: {last_error}")
+
 

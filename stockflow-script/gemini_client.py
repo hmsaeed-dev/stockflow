@@ -72,17 +72,35 @@ def _prepare_image_bytes(image_path: str) -> tuple[bytes, str]:
     return data, "image/jpeg"
 
 
+import os
+import re
+
+def extract_retry_delay(err: Exception) -> float | None:
+    """
+    Extract recommended retry delay in seconds from Gemini API error message.
+    """
+    err_str = str(err)
+    match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 1.5
+    match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s?['\"]", err_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 1.5
+    return None
+
+
 def generate_metadata(
     client,
     image_path: str,
     valid_categories: list[str],
-    max_retries: int = 3,
+    max_retries: int = 5,
 ) -> Metadata:
     """
     Calls Gemini once for a single image and returns parsed Metadata.
     Retries with backoff on transient/rate-limit errors; raises on the
     final failure so the caller can flag the row and move on.
     """
+    model_name = os.environ.get("GEMINI_MODEL", GEMINI_MODEL)
     image_bytes, mime_type = _prepare_image_bytes(image_path)
     prompt = PROMPT_TEMPLATE.format(categories="\n".join(f"- {c}" for c in valid_categories))
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
@@ -92,7 +110,7 @@ def generate_metadata(
         try:
             if hasattr(client, "models") and hasattr(client.models, "generate_content"):
                 response = client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=model_name,
                     contents=[image_part, prompt],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -103,7 +121,7 @@ def generate_metadata(
             elif hasattr(client, "interactions"):
                 import base64
                 interaction = client.interactions.create(
-                    model=GEMINI_MODEL,
+                    model=model_name,
                     input=[
                         {"type": "text", "text": prompt},
                         {
@@ -125,6 +143,15 @@ def generate_metadata(
             return Metadata.model_validate_json(raw_text)
         except Exception as e:  # noqa: BLE001 - want to retry on anything transient
             last_error = e
+            err_str = str(e)
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 1s, 2s, 4s
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    delay = extract_retry_delay(e)
+                    if delay is None:
+                        delay = max(40.0, 5.0 * (2 ** attempt))
+                    print(f"\n[Rate Limit 429] Waiting {delay:.1f}s for quota reset before retrying (attempt {attempt + 1}/{max_retries})... ", end="", flush=True)
+                    time.sleep(delay)
+                else:
+                    time.sleep(2 ** attempt)
     raise RuntimeError(f"Gemini call failed after {max_retries} attempts: {last_error}")
+
