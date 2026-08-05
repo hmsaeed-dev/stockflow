@@ -4,18 +4,15 @@ StockFlow — AI metadata generation for Shutterstock contributor photo submissi
 
 Usage:
     export GEMINI_API_KEY=your-key-here
-    python stockflow.py /path/to/photo/folder [-o output.csv]
+    # Or pool: export GEMINI_API_KEYS=key1,key2,key3
+    python stockflow.py /path/to/photo/folder [-o output.csv] [-b BATCH_SIZE]
 
-Walks the given folder for supported images, asks Gemini for a title,
-keyword list, and category suggestion for each one, validates the result
-against Shutterstock's rules and StockFlow's own quality bar, and writes
-everything to a CSV in Shutterstock's bulk metadata import format:
+Walks the given folder for supported images, asks Gemini in batches for titles,
+keyword lists, and category suggestions, validates results against Shutterstock's
+rules and StockFlow's quality bar, and writes everything to CSV in Shutterstock's
+bulk metadata import format:
 
     Filename,Description,Keywords,Categories,Illustration,Mature Content,Editorial,Needs Review
-
-A row that fails validation is still written (never dropped), with the
-failure reasons in the Needs Review column so it's easy to filter and
-fix by hand instead of getting lost in a large batch.
 """
 import argparse
 import csv
@@ -24,21 +21,18 @@ import sys
 import time
 from pathlib import Path
 
-
 # Add project directory to sys.path for robust module imports
 project_root = Path(__file__).resolve().parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from google import genai
-
+from gemini_client import generate_metadata_batch, get_api_key_pool
 from limits import SUPPORTED_EXTENSIONS
-from gemini_client import generate_metadata
-from validation import load_categories, load_brand_denylist, validate_row
+from validation import load_brand_denylist, load_categories, validate_row
 
 
 def load_env_file(root_dir: Path) -> None:
-    """Helper to auto-load GEMINI_API_KEY from .env if present."""
+    """Helper to auto-load GEMINI_API_KEY / GEMINI_API_KEYS from .env if present."""
     for env_path in [root_dir / ".env", root_dir.parent / ".env", Path.cwd() / ".env"]:
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -49,6 +43,7 @@ def load_env_file(root_dir: Path) -> None:
                     val = val.strip().strip("'\"")
                     if key and key not in os.environ:
                         os.environ[key] = val
+            print(f"  • [Config] Loaded environment variables from '{env_path.name}'")
             break
 
 
@@ -59,82 +54,128 @@ def find_images(folder: Path) -> list[Path]:
     )
 
 
-def process_folder(folder: Path, output_path: Path, root_dir: Path) -> None:
+def process_folder(folder: Path, output_path: Path, root_dir: Path, batch_size: int = 5) -> None:
+    print("\n" + "=" * 70)
+    print(" STOCKFLOW — Shutterstock Contributor Metadata Generator")
+    print("=" * 70)
+    print(" Execution Parameters:")
+    print(f"  • Target Photo Folder: {folder.resolve()}")
+    print(f"  • Output CSV Path    : {output_path.resolve()}")
+    print(f"  • Batch Size         : {batch_size} image(s) per API call")
+    print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')}")
+    print("=" * 70)
+
+    # Step 1: Environment & API Key Verification
+    print("\n[Step 1/5] Verifying API Credentials & Key Pool...")
     load_env_file(root_dir)
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("ERROR: GEMINI_API_KEY is not set. Set it as an environment variable or inside .env file.", file=sys.stderr)
+    api_keys = get_api_key_pool()
+    if not api_keys:
+        print("ERROR: GEMINI_API_KEY or GEMINI_API_KEYS is not set.", file=sys.stderr)
         sys.exit(1)
+    print(f"  • {len(api_keys)} Gemini API key(s) loaded into rotation pool.")
 
+    # Step 2: Configuration & Rule Engine Initialization
+    print("\n[Step 2/5] Loading Configuration Rules and Dictionaries...")
     valid_categories = load_categories(str(root_dir))
     brand_denylist = load_brand_denylist(str(root_dir))
     if not valid_categories:
-        print(f"ERROR: no categories loaded from {root_dir / 'config/categories.txt'}",
-              file=sys.stderr)
+        print(f"ERROR: no categories loaded from {root_dir / 'config/categories.txt'}", file=sys.stderr)
         sys.exit(1)
+    print(f"  • Loaded {len(valid_categories)} valid Shutterstock submission categories.")
+    print(f"  • Loaded {len(brand_denylist)} trademarked terms into the brand denylist.")
 
+    # Step 3: Image Discovery
+    print(f"\n[Step 3/5] Scanning Folder '{folder.name}' for Supported Images...")
     images = find_images(folder)
     if not images:
-        print(f"No supported images found in {folder} "
-              f"(supported: {', '.join(SUPPORTED_EXTENSIONS)})")
+        print(f"  • No supported images found in {folder} (supported formats: {', '.join(SUPPORTED_EXTENSIONS)})")
         return
+    print(f"  • Found {len(images)} supported image file(s): {', '.join(SUPPORTED_EXTENSIONS)}")
 
-    client = genai.Client(api_key=api_key)
     total = len(images)
     ok_count = 0
     flagged_count = 0
     failed_count = 0
 
+    # Step 4: Setup CSV Writer
+    print("\n[Step 4/5] Initializing Output CSV File...")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "Filename", "Description", "Keywords", "Categories",
             "Illustration", "Mature Content", "Editorial", "Needs Review"
         ])
+        f.flush()
+        print("  • Created CSV output file with standard Shutterstock import headers.")
 
-        for i, image_path in enumerate(images, start=1):
-            print(f"[{i}/{total}] {image_path.name} ... ", end="", flush=True)
+        # Step 5: Metadata Generation & Compliance Validation Loop in Batches
+        print(f"\n[Step 5/5] Generating Metadata & Running Compliance Validation ({total} photos)...")
+        print("=" * 70)
+
+        image_batches = [images[i : i + batch_size] for i in range(0, total, batch_size)]
+        processed_count = 0
+
+        for b_idx, current_batch in enumerate(image_batches, start=1):
+            print(f"\n--- Processing Batch {b_idx}/{len(image_batches)} ({len(current_batch)} images) ---")
+
             try:
-                metadata = generate_metadata(
-                    client, str(image_path), sorted(valid_categories)
+                batch_metadata = generate_metadata_batch(
+                    current_batch, sorted(valid_categories), api_keys=api_keys
                 )
-            except Exception as e:  # noqa: BLE001 - keep the batch going
-                print(f"FAILED ({e})")
-                writer.writerow([image_path.name, "", "", "", "No", "No", "No", f"generation failed: {e}"])
-                failed_count += 1
-                continue
+            except Exception as e:
+                print(f"  • [Batch Error] Generation error: {e}")
+                batch_metadata = {}
 
-            reasons = validate_row(
-                metadata.title, metadata.keywords, metadata.categories,
-                valid_categories, brand_denylist,
-            )
-            writer.writerow([
-                image_path.name,
-                metadata.title,
-                ", ".join(metadata.keywords),
-                ", ".join(metadata.categories),
-                "No",
-                "No",
-                "No",
-                "; ".join(reasons),
-            ])
+            for image_path in current_batch:
+                processed_count += 1
+                metadata = batch_metadata.get(image_path)
 
-            if reasons:
-                flagged_count += 1
-                print(f"flagged ({'; '.join(reasons)})")
-            else:
-                ok_count += 1
-                print("ok")
+                if not metadata:
+                    print(f"  [{processed_count}/{total}] {image_path.name} ==> [FAILED]")
+                    writer.writerow([image_path.name, "", "", "", "No", "No", "No", "generation failed"])
+                    failed_count += 1
+                    continue
 
-            # Free tier rate-limiting: Sleep 4s between requests to stay under RPM limit
-            if i < total:
+                reasons = validate_row(
+                    metadata.title, metadata.keywords, metadata.categories,
+                    valid_categories, brand_denylist,
+                )
+                writer.writerow([
+                    image_path.name,
+                    metadata.title,
+                    ", ".join(metadata.keywords),
+                    ", ".join(metadata.categories),
+                    "No",
+                    "No",
+                    "No",
+                    "; ".join(reasons),
+                ])
+
+                if reasons:
+                    flagged_count += 1
+                    print(f"  [{processed_count}/{total}] {image_path.name} ==> FLAGGED ({'; '.join(reasons[:2])})")
+                else:
+                    ok_count += 1
+                    print(f"  [{processed_count}/{total}] {image_path.name} ==> CLEAN")
+
+            # Flush rows to disk after each batch so progress is never lost
+            f.flush()
+
+            # Pacing delay between batch calls
+            if b_idx < len(image_batches):
+                print("  • Pacing delay (4s) before next API batch request...")
                 time.sleep(4)
 
-
-    print()
-    print(f"Done. {ok_count} clean, {flagged_count} flagged for review, "
-          f"{failed_count} failed to generate. Output: {output_path}")
+    print("\n" + "=" * 70)
+    print(" STOCKFLOW EXECUTION SUMMARY")
+    print("=" * 70)
+    print(f"  • Total Images Processed: {total}")
+    print(f"  • Clean (Submission Ready): {ok_count}")
+    print(f"  • Flagged for Manual Review: {flagged_count}")
+    print(f"  • Failed Generation        : {failed_count}")
+    print(f"  • Final Output CSV Saved To: {output_path.resolve()}")
+    print("=" * 70 + "\n")
 
 
 def main():
@@ -142,13 +183,15 @@ def main():
     parser.add_argument("folder", type=Path, help="Folder of photos to process")
     parser.add_argument("-o", "--output", type=Path, default=Path("stockflow_output.csv"),
                          help="Output CSV path (default: stockflow_output.csv)")
+    parser.add_argument("-b", "--batch-size", type=int, default=5,
+                         help="Number of images to process per API call (default: 5)")
     args = parser.parse_args()
 
     if not args.folder.is_dir():
         print(f"ERROR: {args.folder} is not a folder", file=sys.stderr)
         sys.exit(1)
 
-    process_folder(args.folder, args.output, project_root)
+    process_folder(args.folder, args.output, project_root, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":
