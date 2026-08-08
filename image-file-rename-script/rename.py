@@ -29,8 +29,9 @@ if str(script_dir) not in sys.path:
 def load_env_file(root_dir: Path) -> None:
     """
     Auto-load environment variables from .env if present.
+    Prioritizes central root .env before subfolder or working directory .env.
     """
-    for env_file in [root_dir / ".env", root_dir.parent / ".env", Path.cwd() / ".env"]:
+    for env_file in [root_dir.parent / ".env", root_dir / ".env", Path.cwd() / ".env"]:
         if env_file.exists():
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -144,7 +145,7 @@ def batch_rename_images(
     print(f"  • Name Prefix   : '{prefix}'" if prefix else "  • Name Prefix   : (None)")
     print(f"  • Name Suffix   : '{suffix}'" if suffix else "  • Name Suffix   : (None)")
     print(f"  • Search Mode   : {'Recursive (Subdirectories Included)' if recursive else 'Flat (Top Directory Only)'}")
-    print(f"  • Gemini Model  : {os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')}")
+    print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print("=" * 70)
 
     # Step 1: API Key Verification

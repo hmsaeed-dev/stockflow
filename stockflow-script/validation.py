@@ -16,7 +16,7 @@ from limits import (
 )
 
 
-def load_word_list(path: str, project_root: str = ".") -> set[str]:
+def load_word_list(path: str, project_root: str = ".", lower: bool = True) -> set[str]:
     """Load a config file of one entry per line, skipping blanks and comments."""
     p = Path(path)
     if not p.is_absolute():
@@ -34,16 +34,16 @@ def load_word_list(path: str, project_root: str = ".") -> set[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        words.add(line.lower())
+        words.add(line.lower() if lower else line)
     return words
 
 
 def load_categories(project_root: str = ".") -> set[str]:
-    return load_word_list(CATEGORIES_FILE, project_root)
+    return load_word_list(CATEGORIES_FILE, project_root, lower=False)
 
 
 def load_brand_denylist(project_root: str = ".") -> set[str]:
-    return load_word_list(BRAND_DENYLIST_FILE, project_root)
+    return load_word_list(BRAND_DENYLIST_FILE, project_root, lower=True)
 
 
 def validate_row(
@@ -80,16 +80,17 @@ def validate_row(
     else:
         if len(categories) > MAX_CATEGORIES:
             reasons.append(f"{len(categories)} categories (max {MAX_CATEGORIES})")
+        valid_cats_lower = {c.lower() for c in valid_categories}
         for cat in categories:
-            if cat.lower() not in valid_categories:
+            if cat.lower() not in valid_cats_lower:
                 reasons.append(f"category '{cat}' not in category config")
 
-    # Brand-name check across title + keywords (using word boundaries to avoid false positives)
+    # Brand-name check across title + keywords (using boundary-safe regex matching for punctuated brand names)
     import re
     haystack = " ".join([title] + keywords).lower()
     hit_brands = sorted({
         b for b in brand_denylist
-        if re.search(r"\b" + re.escape(b) + r"\b", haystack)
+        if re.search(r"(?:^|(?<=[^a-z0-9]))" + re.escape(b) + r"(?:(?=[^a-z0-9])|$)", haystack)
     })
     if hit_brands:
         reasons.append(f"possible brand name(s): {', '.join(hit_brands)}")

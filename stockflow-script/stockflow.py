@@ -32,8 +32,10 @@ from validation import load_brand_denylist, load_categories, validate_row
 
 
 def load_env_file(root_dir: Path) -> None:
-    """Helper to auto-load GEMINI_API_KEY / GEMINI_API_KEYS from .env if present."""
-    for env_path in [root_dir / ".env", root_dir.parent / ".env", Path.cwd() / ".env"]:
+    """Helper to auto-load GEMINI_API_KEY / GEMINI_API_KEYS from .env if present.
+    Prioritizes central root .env before subfolder or working directory .env.
+    """
+    for env_path in [root_dir.parent / ".env", root_dir / ".env", Path.cwd() / ".env"]:
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -62,7 +64,7 @@ def process_folder(folder: Path, output_path: Path, root_dir: Path, batch_size: 
     print(f"  • Target Photo Folder: {folder.resolve()}")
     print(f"  • Output CSV Path    : {output_path.resolve()}")
     print(f"  • Batch Size         : {batch_size} image(s) per API call")
-    print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')}")
+    print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print("=" * 70)
 
     # Step 1: Environment & API Key Verification

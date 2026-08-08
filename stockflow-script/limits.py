@@ -24,7 +24,7 @@ BRAND_DENYLIST_FILE = "config/brand_denylist.txt"
 import os
 
 # Gemini model used for metadata generation.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 # Accepted input image extensions (must match Gemini's supported MIME types).

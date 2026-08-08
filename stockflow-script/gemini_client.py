@@ -16,9 +16,10 @@ import time
 from pathlib import Path
 
 try:
+    from google import genai
     from google.genai import types
 except ImportError:
-    print("ERROR: Could not import 'types' from 'google.genai'.", file=sys.stderr)
+    print("ERROR: Could not import 'google-genai' package.", file=sys.stderr)
     print("Please make sure 'google-genai' is installed in your Python environment:", file=sys.stderr)
     print("    pip install google-genai", file=sys.stderr)
     sys.exit(1)
@@ -29,7 +30,7 @@ from pydantic import BaseModel, Field
 from limits import GEMINI_MODEL
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", GEMINI_MODEL)
-FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
 
 
 class Metadata(BaseModel):
@@ -164,7 +165,6 @@ def generate_metadata(
     last_error = None
     for target_model in models_to_try:
         for key_idx, key in enumerate(api_keys, start=1):
-            from google import genai
             active_client = genai.Client(api_key=key)
             for attempt in range(max_retries):
                 try:
@@ -228,7 +228,6 @@ def generate_metadata_batch(
     last_error = None
     for target_model in models_to_try:
         for key_idx, key in enumerate(api_keys, start=1):
-            from google import genai
             client = genai.Client(api_key=key)
             for attempt in range(2):
                 try:

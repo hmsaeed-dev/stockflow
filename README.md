@@ -40,12 +40,11 @@ An end-to-end AI automation suite for **image metadata** powered by **Google Gem
 
 Clone this repository and install the shared dependencies:
 
-* [ ]
-  ```bash
-  git clone https://github.com/your-username/shutterstock-ai-automation.git
-  cd shutterstock-ai-automation
-  pip install -r requirements.txt
-  ```
+```bash
+git clone https://github.com/your-username/shutterstock-ai-automation.git
+cd shutterstock-ai-automation
+pip install -r requirements.txt
+```
 
 ### 2. Configure API Key
 
@@ -59,6 +58,9 @@ Inside `.env`:
 
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
+
+# Optional model override (default: gemini-2.5-flash)
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
 ---
