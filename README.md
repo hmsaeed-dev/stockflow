@@ -41,8 +41,8 @@ An end-to-end AI automation suite for **image metadata** powered by **Google Gem
 Clone this repository and install the shared dependencies:
 
 ```bash
-git clone https://github.com/your-username/shutterstock-ai-automation.git
-cd shutterstock-ai-automation
+git clone https://github.com/hmsaeed-dev/stockflow.git
+cd stockflow
 pip install -r requirements.txt
 ```
 
