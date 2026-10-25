@@ -49,6 +49,12 @@ def load_env_file(root_dir: Path) -> None:
             break
 
 
+CSV_HEADERS = [
+    "Filename", "Description", "Keywords", "Categories",
+    "Illustration", "Mature Content", "Editorial", "Needs Review"
+]
+
+
 def find_images(folder: Path) -> list[Path]:
     return sorted(
         p for p in folder.iterdir()
@@ -56,7 +62,42 @@ def find_images(folder: Path) -> list[Path]:
     )
 
 
-def process_folder(folder: Path, output_path: Path, root_dir: Path, batch_size: int = 5) -> None:
+def read_existing_csv(output_path: Path) -> dict[str, list[str]]:
+    """
+    Reads an existing output CSV to support resuming interrupted jobs.
+    Returns a dict mapping filename -> raw row list.
+    Rows with 'generation failed' are excluded so they get re-attempted.
+    """
+    if not output_path.exists():
+        return {}
+    completed: dict[str, list[str]] = {}
+    try:
+        with open(output_path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                return {}
+            for row in reader:
+                if row and len(row) >= 8:
+                    fname = row[0].strip()
+                    needs_review = row[7].strip()
+                    if fname and needs_review != "generation failed":
+                        completed[fname] = row
+    except Exception as e:
+        print(f"  • [Resume Warning] Could not read existing CSV '{output_path.name}': {e}")
+    return completed
+
+
+def process_folder(
+    folder: Path,
+    output_path: Path,
+    root_dir: Path,
+    batch_size: int = 5,
+    resume: bool = True,
+    pacing_delay: float = 5.0,
+    progress_callback: object = None,
+    log_callback: object = None,
+) -> dict:
     print("\n" + "=" * 70)
     print(" STOCKFLOW — Shutterstock Contributor Metadata Generator")
     print("=" * 70)
@@ -64,137 +105,256 @@ def process_folder(folder: Path, output_path: Path, root_dir: Path, batch_size: 
     print(f"  • Target Photo Folder: {folder.resolve()}")
     print(f"  • Output CSV Path    : {output_path.resolve()}")
     print(f"  • Batch Size         : {batch_size} image(s) per API call")
+    print(f"  • Pacing Delay       : {pacing_delay}s between API calls")
+    print(f"  • Resume Mode        : {'Enabled (skip previously processed)' if resume else 'Disabled (overwrite)'}")
     print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print("=" * 70)
 
+    def log(msg: str) -> None:
+        print(msg)
+        if callable(log_callback):
+            log_callback(msg)
+
     # Step 1: Environment & API Key Verification
-    print("\n[Step 1/5] Verifying API Credentials & Key Pool...")
+    log("\n[Step 1/5] Verifying API Credentials & Key Pool...")
     load_env_file(root_dir)
 
     api_keys = get_api_key_pool()
     if not api_keys:
-        print("ERROR: GEMINI_API_KEY or GEMINI_API_KEYS is not set.", file=sys.stderr)
+        err_msg = "ERROR: GEMINI_API_KEY or GEMINI_API_KEYS is not set."
+        print(err_msg, file=sys.stderr)
+        if callable(log_callback):
+            log_callback(err_msg)
         sys.exit(1)
-    print(f"  • {len(api_keys)} Gemini API key(s) loaded into rotation pool.")
+    log(f"  • {len(api_keys)} Gemini API key(s) loaded into rotation pool.")
 
     # Step 2: Configuration & Rule Engine Initialization
-    print("\n[Step 2/5] Loading Configuration Rules and Dictionaries...")
+    log("\n[Step 2/5] Loading Configuration Rules and Dictionaries...")
     valid_categories = load_categories(str(root_dir))
     brand_denylist = load_brand_denylist(str(root_dir))
     if not valid_categories:
-        print(f"ERROR: no categories loaded from {root_dir / 'config/categories.txt'}", file=sys.stderr)
+        err_msg = f"ERROR: no categories loaded from {root_dir / 'config/categories.txt'}"
+        print(err_msg, file=sys.stderr)
+        if callable(log_callback):
+            log_callback(err_msg)
         sys.exit(1)
-    print(f"  • Loaded {len(valid_categories)} valid Shutterstock submission categories.")
-    print(f"  • Loaded {len(brand_denylist)} trademarked terms into the brand denylist.")
+    log(f"  • Loaded {len(valid_categories)} valid Shutterstock submission categories.")
+    log(f"  • Loaded {len(brand_denylist)} trademarked terms into the brand denylist.")
 
     # Step 3: Image Discovery
-    print(f"\n[Step 3/5] Scanning Folder '{folder.name}' for Supported Images...")
-    images = find_images(folder)
-    if not images:
-        print(f"  • No supported images found in {folder} (supported formats: {', '.join(SUPPORTED_EXTENSIONS)})")
-        return
-    print(f"  • Found {len(images)} supported image file(s): {', '.join(SUPPORTED_EXTENSIONS)}")
+    log(f"\n[Step 3/5] Scanning Folder '{folder.name}' for Supported Images...")
+    all_images = find_images(folder)
+    if not all_images:
+        msg = f"  • No supported images found in {folder} (supported formats: {', '.join(SUPPORTED_EXTENSIONS)})"
+        log(msg)
+        return {"total": 0, "ok_count": 0, "flagged_count": 0, "failed_count": 0, "output_path": output_path}
+    log(f"  • Found {len(all_images)} supported image file(s): {', '.join(SUPPORTED_EXTENSIONS)}")
 
-    total = len(images)
+    total = len(all_images)
     ok_count = 0
     flagged_count = 0
     failed_count = 0
 
+    # Resume Check: Read existing output if available
+    existing_completed: dict[str, list[str]] = {}
+    if resume and output_path.exists():
+        existing_completed = read_existing_csv(output_path)
+        if existing_completed:
+            log(f"  • [Resume] Found {len(existing_completed)} previously completed image(s) in CSV. Skipping them.")
+
+    # Determine which images need processing
+    to_process: list[Path] = []
+    initial_rows: list[list[str]] = []
+
+    for img in all_images:
+        if img.name in existing_completed:
+            row = existing_completed[img.name]
+            initial_rows.append(row)
+            reasons_str = row[7].strip()
+            if reasons_str:
+                flagged_count += 1
+            else:
+                ok_count += 1
+            if callable(progress_callback):
+                progress_callback({
+                    "event": "image_cached",
+                    "filename": img.name,
+                    "row": row,
+                    "ok_count": ok_count,
+                    "flagged_count": flagged_count,
+                    "failed_count": failed_count,
+                    "total": total,
+                })
+        else:
+            to_process.append(img)
+
+    processed_count = len(initial_rows)
+
     # Step 4: Setup CSV Writer
-    print("\n[Step 4/5] Initializing Output CSV File...")
+    log(f"\n[Step 4/5] Initializing Output CSV File '{output_path.name}'...")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "Filename", "Description", "Keywords", "Categories",
-            "Illustration", "Mature Content", "Editorial", "Needs Review"
-        ])
+        writer.writerow(CSV_HEADERS)
+        for row in initial_rows:
+            writer.writerow(row)
         f.flush()
-        print("  • Created CSV output file with standard Shutterstock import headers.")
 
         # Step 5: Metadata Generation & Compliance Validation Loop in Batches
-        print(f"\n[Step 5/5] Generating Metadata & Running Compliance Validation ({total} photos)...")
-        print("=" * 70)
+        if not to_process:
+            log(f"  • All {total} images were already completed in '{output_path.name}'. Nothing to do!")
+        else:
+            log(f"\n[Step 5/5] Generating Metadata & Running Compliance Validation ({len(to_process)} new photos)...")
+            log("=" * 70)
 
-        image_batches = [images[i : i + batch_size] for i in range(0, total, batch_size)]
-        processed_count = 0
+            image_batches = [to_process[i : i + batch_size] for i in range(0, len(to_process), batch_size)]
 
-        for b_idx, current_batch in enumerate(image_batches, start=1):
-            print(f"\n--- Processing Batch {b_idx}/{len(image_batches)} ({len(current_batch)} images) ---")
+            for b_idx, current_batch in enumerate(image_batches, start=1):
+                log(f"\n--- Processing Batch {b_idx}/{len(image_batches)} ({len(current_batch)} images) ---")
 
-            try:
-                batch_metadata = generate_metadata_batch(
-                    current_batch, sorted(valid_categories), api_keys=api_keys
-                )
-            except Exception as e:
-                print(f"  • [Batch Error] Generation error: {e}")
-                batch_metadata = {}
+                if callable(progress_callback):
+                    progress_callback({
+                        "event": "batch_start",
+                        "batch_idx": b_idx,
+                        "total_batches": len(image_batches),
+                        "batch_size": len(current_batch),
+                        "processed_count": processed_count,
+                        "total": total,
+                    })
 
-            for image_path in current_batch:
-                processed_count += 1
-                metadata = batch_metadata.get(image_path)
+                try:
+                    batch_metadata = generate_metadata_batch(
+                        current_batch,
+                        sorted(valid_categories),
+                        api_keys=api_keys,
+                        log_callback=log_callback,
+                    )
+                except Exception as e:
+                    log(f"  • [Batch Error] Generation error: {e}")
+                    batch_metadata = {}
 
-                if not metadata:
-                    print(f"  [{processed_count}/{total}] {image_path.name} ==> [FAILED]")
-                    writer.writerow([image_path.name, "", "", "", "No", "No", "No", "generation failed"])
-                    failed_count += 1
-                    continue
+                for image_path in current_batch:
+                    processed_count += 1
+                    metadata = batch_metadata.get(image_path)
 
-                reasons = validate_row(
-                    metadata.title, metadata.keywords, metadata.categories,
-                    valid_categories, brand_denylist,
-                )
-                writer.writerow([
-                    image_path.name,
-                    metadata.title,
-                    ", ".join(metadata.keywords),
-                    ", ".join(metadata.categories),
-                    "No",
-                    "No",
-                    "No",
-                    "; ".join(reasons),
-                ])
+                    if not metadata:
+                        log(f"  [{processed_count}/{total}] {image_path.name} ==> [FAILED]")
+                        row = [image_path.name, "", "", "", "No", "No", "No", "generation failed"]
+                        writer.writerow(row)
+                        failed_count += 1
+                        if callable(progress_callback):
+                            progress_callback({
+                                "event": "image_processed",
+                                "filename": image_path.name,
+                                "status": "FAILED",
+                                "reasons": ["generation failed"],
+                                "row": row,
+                                "ok_count": ok_count,
+                                "flagged_count": flagged_count,
+                                "failed_count": failed_count,
+                                "total": total,
+                                "current": processed_count,
+                            })
+                        continue
 
-                if reasons:
-                    flagged_count += 1
-                    print(f"  [{processed_count}/{total}] {image_path.name} ==> FLAGGED ({'; '.join(reasons[:2])})")
-                else:
-                    ok_count += 1
-                    print(f"  [{processed_count}/{total}] {image_path.name} ==> CLEAN")
+                    reasons = validate_row(
+                        metadata.title, metadata.keywords, metadata.categories,
+                        valid_categories, brand_denylist,
+                    )
+                    row = [
+                        image_path.name,
+                        metadata.title,
+                        ", ".join(metadata.keywords),
+                        ", ".join(metadata.categories),
+                        "No",
+                        "No",
+                        "No",
+                        "; ".join(reasons),
+                    ]
+                    writer.writerow(row)
 
-            # Flush rows to disk after each batch so progress is never lost
-            f.flush()
+                    if reasons:
+                        flagged_count += 1
+                        log(f"  [{processed_count}/{total}] {image_path.name} ==> FLAGGED ({'; '.join(reasons[:2])})")
+                        status = "FLAGGED"
+                    else:
+                        ok_count += 1
+                        log(f"  [{processed_count}/{total}] {image_path.name} ==> CLEAN")
+                        status = "CLEAN"
 
-            # Pacing delay between batch calls
-            if b_idx < len(image_batches):
-                print("  • Pacing delay (4s) before next API batch request...")
-                time.sleep(4)
+                    if callable(progress_callback):
+                        progress_callback({
+                            "event": "image_processed",
+                            "filename": image_path.name,
+                            "status": status,
+                            "reasons": reasons,
+                            "row": row,
+                            "ok_count": ok_count,
+                            "flagged_count": flagged_count,
+                            "failed_count": failed_count,
+                            "total": total,
+                            "current": processed_count,
+                        })
 
-    print("\n" + "=" * 70)
-    print(" STOCKFLOW EXECUTION SUMMARY")
-    print("=" * 70)
-    print(f"  • Total Images Processed: {total}")
-    print(f"  • Clean (Submission Ready): {ok_count}")
-    print(f"  • Flagged for Manual Review: {flagged_count}")
-    print(f"  • Failed Generation        : {failed_count}")
-    print(f"  • Final Output CSV Saved To: {output_path.resolve()}")
-    print("=" * 70 + "\n")
+                # Flush rows to disk after each batch so progress is never lost
+                f.flush()
+
+                # Pacing delay between batch calls to remain safely under free-tier 15 RPM
+                if b_idx < len(image_batches):
+                    log(f"  • Pacing delay ({pacing_delay}s) before next API batch request...")
+                    time.sleep(pacing_delay)
+
+    log("\n" + "=" * 70)
+    log(" STOCKFLOW EXECUTION SUMMARY")
+    log("=" * 70)
+    log(f"  • Total Images Processed: {total}")
+    log(f"  • Clean (Submission Ready): {ok_count}")
+    log(f"  • Flagged for Manual Review: {flagged_count}")
+    log(f"  • Failed Generation        : {failed_count}")
+    log(f"  • Final Output CSV Saved To: {output_path.resolve()}")
+    log("=" * 70 + "\n")
+
+    summary = {
+        "total": total,
+        "ok_count": ok_count,
+        "flagged_count": flagged_count,
+        "failed_count": failed_count,
+        "output_path": output_path,
+    }
+    if callable(progress_callback):
+        progress_callback({"event": "completed", **summary})
+
+    return summary
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Shutterstock metadata for a folder of photos.")
     parser.add_argument("folder", type=Path, help="Folder of photos to process")
     parser.add_argument("-o", "--output", type=Path, default=Path("stockflow_output.csv"),
-                         help="Output CSV path (default: stockflow_output.csv)")
+                        help="Output CSV path (default: stockflow_output.csv)")
     parser.add_argument("-b", "--batch-size", type=int, default=5,
-                         help="Number of images to process per API call (default: 5)")
+                        help="Number of images to process per API call (default: 5)")
+    parser.add_argument("-d", "--delay", type=float, default=5.0,
+                        help="Pacing delay in seconds between batch API calls (default: 5.0)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Overwrite existing output CSV instead of resuming")
     args = parser.parse_args()
 
     if not args.folder.is_dir():
         print(f"ERROR: {args.folder} is not a folder", file=sys.stderr)
         sys.exit(1)
 
-    process_folder(args.folder, args.output, project_root, batch_size=args.batch_size)
+    process_folder(
+        args.folder,
+        args.output,
+        project_root,
+        batch_size=args.batch_size,
+        resume=not args.no_resume,
+        pacing_delay=args.delay,
+    )
 
 
 if __name__ == "__main__":
     main()
+

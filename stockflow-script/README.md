@@ -34,8 +34,14 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 ### Step 3: Run StockFlow!
 
-Generate Shutterstock-ready metadata CSV for your photo folder:
+#### Option A: Interactive Streamlit UI (Recommended)
+Launch the browser UI:
+```bash
+streamlit run app.py
+```
+*Point it at your photo folder, click **Start Generating**, watch live progress and preview tables, and grab the CSV with 1-click download!*
 
+#### Option B: Command-Line Interface (CLI)
 ```bash
 python stockflow.py /path/to/your/photos -o stockflow_output.csv
 ```
@@ -49,6 +55,9 @@ python stockflow.py /path/to/your/photos -o stockflow_output.csv
 | `folder` | | **(Required)** Path to folder containing image files | | `python stockflow.py ./photos` |
 | `--output` | `-o` | Target CSV output file path | `stockflow_output.csv` | `python stockflow.py ./photos -o catalog.csv` |
 | `--batch-size` | `-b` | Number of images per API call | `5` | `python stockflow.py ./photos -b 10` |
+| `--delay` | `-d` | Pacing delay (seconds) between batch requests | `5.0` | `python stockflow.py ./photos -d 6.0` |
+| `--no-resume` | | Overwrite existing output CSV instead of resuming | `False` | `python stockflow.py ./photos --no-resume` |
+
 
 ---
 
@@ -89,9 +98,12 @@ Configuration dictionaries are located inside `config/`:
 
 ---
 
-## ⚡ Performance Features
+## ⚡ Performance & Reliability Features
+ 
+ 1. **Batch API Processing**: Groups multiple images into a single multimodal API payload (default 5 photos per call) reducing API calls by up to 80%.
+ 2. **Free-Tier 429 Quota Resilience**: Automatically parses Gemini quota retry delays and safely waits out the rate-limit window without crashing, losing progress, or discarding remaining images.
+ 3. **Smart Resume & Checkpointing**: Re-running on a folder checks the destination CSV and skips already processed images, allowing seamless resumption of interrupted or paused jobs.
+ 4. **API Key Rotation Pool**: Supports comma-separated keys in `GEMINI_API_KEYS` to automatically rotate keys upon hitting rate limits.
+ 5. **Model Fallback**: Automatically cascades across Gemini models (`gemini-2.5-flash` ➔ `gemini-2.0-flash` ➔ `gemini-1.5-flash`) if primary quota is reached.
+ 6. **Smart Downscaling**: Resizes large images to 1024px in memory before sending, drastically minimizing token overhead.
 
-1. **Batch API Processing**: Groups multiple images into a single multimodal API payload (default 5 photos per call) reducing API calls by up to 80%.
-2. **API Key Rotation Pool**: Supports comma-separated keys in `GEMINI_API_KEYS` to automatically rotate keys upon hitting rate limits.
-3. **Model Fallback**: Automatically cascades across Gemini models (`gemini-2.5-flash` ➔ `gemini-2.0-flash` ➔ `gemini-1.5-flash`) if primary quota is reached.
-4. **Smart Downscaling**: Resizes large images to 1024px in memory before sending, drastically minimizing token overhead.

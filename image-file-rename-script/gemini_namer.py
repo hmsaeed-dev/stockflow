@@ -133,15 +133,37 @@ def prepare_image_bytes(image_path: Path, max_dim: int = 1024) -> tuple[bytes, s
 def extract_retry_delay(err: Exception) -> float | None:
     """
     Extract recommended retry delay in seconds from Gemini API error message.
+    Adds a small buffer to ensure the rate limit window has fully cleared.
     """
     err_str = str(err)
-    match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
-    if match:
-        return float(match.group(1)) + 1.5
-    match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s?['\"]", err_str, re.IGNORECASE)
-    if match:
-        return float(match.group(1)) + 1.5
+    patterns = [
+        r"retry in (\d+(?:\.\d+)?)s",
+        r"['\"]retryDelay['\"]\s*:\s*['\"]?(\d+(?:\.\d+)?)s?['\"]?",
+        r"retry after (\d+(?:\.\d+)?)s?",
+        r"wait (\d+(?:\.\d+)?)s",
+        r"reset in (\d+(?:\.\d+)?)s",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, err_str, re.IGNORECASE)
+        if match:
+            delay = float(match.group(1)) + 2.0  # +2s safety buffer
+            return min(max(delay, 2.0), 90.0)  # Between 2 and 90 seconds
     return None
+
+
+def sleep_with_countdown(seconds: float, log_callback: object = None, reason: str = "Rate limit reached (429)") -> None:
+    """
+    Sleeps in 1-second ticks while invoking log_callback every second.
+    """
+    rem = int(seconds)
+    fraction = seconds - rem
+    if fraction > 0:
+        time.sleep(fraction)
+    for s in range(rem, 0, -1):
+        msg = f"{reason}. Waiting {s}s for quota reset..."
+        if callable(log_callback):
+            log_callback(msg)
+        time.sleep(1.0)
 
 
 def suggest_image_name(
@@ -149,7 +171,8 @@ def suggest_image_name(
     image_path: Path,
     api_keys: list[str] | None = None,
     model_name: str | None = None,
-    max_retries: int = 3,
+    max_retries: int = 4,
+    log_callback: object = None,
 ) -> str:
     """
     Single-image suggestion helper with API Key Rotation and Model Fallback support.
@@ -188,12 +211,19 @@ def suggest_image_name(
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         delay = extract_retry_delay(e)
-                        if delay and delay < 15 and attempt < max_retries - 1:
-                            print(f"  • [Rate Limit 429] Key #{key_idx} temporary delay ({delay:.1f}s)...")
-                            time.sleep(delay)
+                        if delay is None:
+                            delay = [10.0, 20.0, 35.0, 60.0][min(attempt, 3)]
+                        msg = f"Gemini rate limit (429). Waiting {delay:.1f}s for quota reset (attempt {attempt + 1}/{max_retries})..."
+                        print(f"  • {msg}")
+                        if callable(log_callback):
+                            log_callback(msg)
+
+                        if attempt < max_retries - 1:
+                            sleep_with_countdown(delay, log_callback=log_callback, reason=f"Gemini rate limit (429) [attempt {attempt + 1}/{max_retries}]")
+                            continue
                         else:
                             print(f"  • [Quota Exhausted] Key #{key_idx} hit 429 on model {target_model}. Switching key/model...")
-                            break  # Switch key immediately
+                            break
                     else:
                         backoff = 2 ** attempt
                         time.sleep(backoff)
@@ -205,12 +235,12 @@ def suggest_image_names_batch(
     image_paths: list[Path],
     api_keys: list[str] | None = None,
     model_name: str | None = None,
+    max_retries: int = 4,
+    log_callback: object = None,
 ) -> dict[Path, str]:
     """
     Analyze a batch of images (e.g. 5 photos) in a SINGLE Gemini API call.
-    Includes API Key Rotation pool and Model Fallback.
-
-    Returns dict mapping image Path -> sanitized name slug string.
+    Includes API Key Rotation pool, Model Fallback, and automatic 429 rate limit waiting.
     """
     if not image_paths:
         return {}
@@ -238,7 +268,7 @@ def suggest_image_names_batch(
     for target_model in models_to_try:
         for key_idx, key in enumerate(api_keys, start=1):
             client = genai.Client(api_key=key)
-            for attempt in range(2):
+            for attempt in range(max_retries):
                 try:
                     print(
                         f"  • [AI Batch Request] Sending batch of {len(image_paths)} images using API Key #{key_idx}/{len(api_keys)} (Model: {target_model})..."
@@ -268,24 +298,33 @@ def suggest_image_names_batch(
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         delay = extract_retry_delay(e)
-                        if delay and delay < 15 and attempt < 1:
-                            print(f"  • [Rate Limit 429] Key #{key_idx} temporary delay ({delay:.1f}s)...")
-                            time.sleep(delay)
+                        if delay is None:
+                            delay = [10.0, 20.0, 35.0, 60.0][min(attempt, 3)]
+                        msg = f"Gemini rate limit (429). Waiting {delay:.1f}s for quota reset (attempt {attempt + 1}/{max_retries})..."
+                        print(f"  • {msg}")
+                        if callable(log_callback):
+                            log_callback(msg)
+
+                        if attempt < max_retries - 1:
+                            sleep_with_countdown(delay, log_callback=log_callback, reason=f"Gemini rate limit (429) [attempt {attempt + 1}/{max_retries}]")
+                            continue
                         else:
                             print(
                                 f"  • [Quota Exhausted] Key #{key_idx} hit 429 quota on {target_model}. Rotating key/model..."
                             )
-                            break  # Switch key immediately
+                            break
                     else:
                         time.sleep(2 ** attempt)
 
     print("  • [Batch Fallback] Batch request failed across all keys/models. Falling back to single image calls...")
 
     # Fallback: Process images one by one if batch fails completely
-    fallback_results: dict[Path, str] = {}
     for img_path in image_paths:
         try:
-            fallback_results[img_path] = suggest_image_name(None, img_path, api_keys=api_keys, model_name=model_name)
+            fallback_results[img_path] = suggest_image_name(
+                None, img_path, api_keys=api_keys, model_name=model_name, max_retries=max_retries, log_callback=log_callback
+            )
         except Exception as e:
             fallback_results[img_path] = sanitize_slug(img_path.stem)
     return fallback_results
+

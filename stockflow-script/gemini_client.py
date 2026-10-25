@@ -30,7 +30,14 @@ from pydantic import BaseModel, Field
 from limits import GEMINI_MODEL
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", GEMINI_MODEL)
-FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-flash-latest",
+]
+
 
 
 class Metadata(BaseModel):
@@ -127,15 +134,38 @@ def _prepare_image_bytes(image_path: str, max_dim: int = 1024) -> tuple[bytes, s
 def extract_retry_delay(err: Exception) -> float | None:
     """
     Extract recommended retry delay in seconds from Gemini API error message.
+    Adds a small buffer to ensure the rate limit window has fully cleared.
     """
     err_str = str(err)
-    match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
-    if match:
-        return float(match.group(1)) + 1.5
-    match = re.search(r"['\"]retryDelay['\"]\s*:\s*['\"](\d+(?:\.\d+)?)s?['\"]", err_str, re.IGNORECASE)
-    if match:
-        return float(match.group(1)) + 1.5
+    patterns = [
+        r"retry in (\d+(?:\.\d+)?)s",
+        r"['\"]retryDelay['\"]\s*:\s*['\"]?(\d+(?:\.\d+)?)s?['\"]?",
+        r"retry after (\d+(?:\.\d+)?)s?",
+        r"wait (\d+(?:\.\d+)?)s",
+        r"reset in (\d+(?:\.\d+)?)s",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, err_str, re.IGNORECASE)
+        if match:
+            delay = float(match.group(1)) + 2.0  # +2s safety buffer
+            return min(max(delay, 2.0), 90.0)  # Between 2 and 90 seconds
     return None
+
+
+def sleep_with_countdown(seconds: float, log_callback: object = None, reason: str = "Rate limit reached (429)") -> None:
+    """
+    Sleeps in 1-second ticks while invoking log_callback every second.
+    This drives real-time visual countdown timers in the UI.
+    """
+    rem = int(seconds)
+    fraction = seconds - rem
+    if fraction > 0:
+        time.sleep(fraction)
+    for s in range(rem, 0, -1):
+        msg = f"{reason}. Waiting {s}s for quota reset..."
+        if callable(log_callback):
+            log_callback(msg)
+        time.sleep(1.0)
 
 
 def generate_metadata(
@@ -143,10 +173,12 @@ def generate_metadata(
     image_path: str,
     valid_categories: list[str],
     api_keys: list[str] | None = None,
-    max_retries: int = 3,
+    max_retries: int = 4,
+    log_callback: object = None,
 ) -> Metadata:
     """
-    Single image metadata generator with API Key Rotation and Model Fallback.
+    Single image metadata generator with API Key Rotation, Model Fallback,
+    and automatic 429 rate limit backoff.
     """
     if api_keys is None:
         api_keys = get_api_key_pool()
@@ -182,10 +214,18 @@ def generate_metadata(
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         delay = extract_retry_delay(e)
-                        if delay and delay < 15 and attempt < max_retries - 1:
-                            time.sleep(delay)
+                        if delay is None:
+                            delay = [10.0, 20.0, 35.0, 60.0][min(attempt, 3)]
+                        msg = f"Gemini rate limit reached (429). Waiting {delay:.1f}s for quota reset (attempt {attempt + 1}/{max_retries})..."
+                        print(f"  • {msg}")
+                        if callable(log_callback):
+                            log_callback(msg)
+
+                        if attempt < max_retries - 1:
+                            sleep_with_countdown(delay, log_callback=log_callback, reason=f"Gemini rate limit (429) [attempt {attempt + 1}/{max_retries}]")
+                            continue
                         else:
-                            print(f"  • [Quota Exhausted] Key #{key_idx} hit 429 quota on {target_model}. Rotating key/model...")
+                            print(f"  • [Quota Exhausted] Key #{key_idx} exhausted retries on {target_model}. Trying next key/model...")
                             break
                     else:
                         time.sleep(2 ** attempt)
@@ -197,10 +237,12 @@ def generate_metadata_batch(
     image_paths: list[Path],
     valid_categories: list[str],
     api_keys: list[str] | None = None,
+    max_retries: int = 4,
+    log_callback: object = None,
 ) -> dict[Path, Metadata]:
     """
     Generate metadata for a batch of images in a SINGLE Gemini API call.
-    Includes Key Rotation pool and Model Fallback.
+    Includes Key Rotation pool, Model Fallback, and automatic 429 rate limit backoff.
     """
     if not image_paths:
         return {}
@@ -229,7 +271,7 @@ def generate_metadata_batch(
     for target_model in models_to_try:
         for key_idx, key in enumerate(api_keys, start=1):
             client = genai.Client(api_key=key)
-            for attempt in range(2):
+            for attempt in range(max_retries):
                 try:
                     print(
                         f"  • [AI Batch Request] Sending batch of {len(image_paths)} images using API Key #{key_idx}/{len(api_keys)} (Model: {target_model})..."
@@ -259,7 +301,7 @@ def generate_metadata_batch(
                             # Fallback if specific item was omitted in model output
                             results[img_path] = Metadata(
                                 title=f"Photo of {img_path.stem.replace('_', ' ')}",
-                                keywords=["stock", "photography", "photo", "image"],
+                                keywords=["stock", "photography", "photo", "image", "picture", "background", "high quality", "detail", "subject"],
                                 categories=[valid_categories[0]] if valid_categories else ["Abstract"],
                             )
                     return results
@@ -269,11 +311,19 @@ def generate_metadata_batch(
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         delay = extract_retry_delay(e)
-                        if delay and delay < 15 and attempt < 1:
-                            time.sleep(delay)
+                        if delay is None:
+                            delay = [10.0, 20.0, 35.0, 60.0][min(attempt, 3)]
+                        msg = f"Gemini rate limit reached (429). Waiting {delay:.1f}s for quota reset (attempt {attempt + 1}/{max_retries})..."
+                        print(f"  • {msg}")
+                        if callable(log_callback):
+                            log_callback(msg)
+
+                        if attempt < max_retries - 1:
+                            sleep_with_countdown(delay, log_callback=log_callback, reason=f"Gemini rate limit (429) [attempt {attempt + 1}/{max_retries}]")
+                            continue
                         else:
                             print(
-                                f"  • [Quota Exhausted] Key #{key_idx} hit 429 quota on {target_model}. Rotating key/model..."
+                                f"  • [Quota Exhausted] Key #{key_idx} exhausted retries on {target_model}. Rotating key/model..."
                             )
                             break
                     else:
@@ -283,11 +333,13 @@ def generate_metadata_batch(
     fallback_results: dict[Path, Metadata] = {}
     for img_path in image_paths:
         try:
-            fallback_results[img_path] = generate_metadata(None, str(img_path), valid_categories, api_keys=api_keys)
+            fallback_results[img_path] = generate_metadata(
+                None, str(img_path), valid_categories, api_keys=api_keys, max_retries=max_retries, log_callback=log_callback
+            )
         except Exception as e:
             fallback_results[img_path] = Metadata(
                 title=f"Photo of {img_path.stem.replace('_', ' ')}",
-                keywords=["stock", "photo"],
+                keywords=["stock", "photo", "photography", "image", "picture", "background", "high quality", "detail", "subject"],
                 categories=[valid_categories[0]] if valid_categories else ["Abstract"],
             )
     return fallback_results

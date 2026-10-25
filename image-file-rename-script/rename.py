@@ -114,6 +114,7 @@ def undo_renames(mapping_file: Path, dry_run: bool = False) -> None:
     print("-" * 70)
     print(f"[Step 2/2] Revert Summary: Successfully restored {reverted} / {len(mapping)} files.")
     print("=" * 70 + "\n")
+    return {"reverted": reverted, "total": len(mapping)}
 
 
 def batch_rename_images(
@@ -124,7 +125,10 @@ def batch_rename_images(
     suffix: str = "",
     recursive: bool = False,
     batch_size: int = 5,
-) -> None:
+    pacing_delay: float = 4.0,
+    progress_callback: object = None,
+    log_callback: object = None,
+) -> dict:
     """
     Main batch renaming workflow:
     1. Discovers matching images in the target directory.
@@ -148,23 +152,30 @@ def batch_rename_images(
     print(f"  • Gemini Model       : {os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print("=" * 70)
 
+    def log(msg: str) -> None:
+        print(msg)
+        if callable(log_callback):
+            log_callback(msg)
+
     # Step 1: API Key Verification
-    print("\n[Step 1/4] Verifying API Credentials & Pool...")
+    log("\n[Step 1/4] Verifying API Credentials & Pool...")
     load_env_file(script_dir)
     api_keys = get_api_key_pool()
     if not api_keys:
-        print("ERROR: GEMINI_API_KEY or GEMINI_API_KEYS environment variable is not set.", file=sys.stderr)
-        print("Set it in your terminal or create a .env file.", file=sys.stderr)
+        err_msg = "ERROR: GEMINI_API_KEY or GEMINI_API_KEYS environment variable is not set."
+        print(err_msg, file=sys.stderr)
+        if callable(log_callback):
+            log_callback(err_msg)
         sys.exit(1)
-    print(f"  • {len(api_keys)} Gemini API key(s) loaded into rotation pool.")
+    log(f"  • {len(api_keys)} Gemini API key(s) loaded into rotation pool.")
 
     # Step 2: Image Discovery
-    print(f"\n[Step 2/4] Discovering Supported Images in '{folder.name}'...")
+    log(f"\n[Step 2/4] Discovering Supported Images in '{folder.name}'...")
     images = find_images(folder, recursive=recursive)
     if not images:
-        print(f"  • No supported images found in {folder} (supported formats: {', '.join(SUPPORTED_EXTENSIONS)})")
-        return
-    print(f"  • Found {len(images)} image file(s) matching supported extensions.")
+        log(f"  • No supported images found in {folder} (supported formats: {', '.join(SUPPORTED_EXTENSIONS)})")
+        return {"total": 0, "renamed_count": 0, "unchanged_count": 0, "proposed_renames": [], "mapping_data": [], "log_file": None, "dry_run": dry_run}
+    log(f"  • Found {len(images)} image file(s) matching supported extensions.")
 
     total = len(images)
     proposed_renames = []
@@ -173,32 +184,37 @@ def batch_rename_images(
     mapping_data = []
 
     # Step 3: Process Images in Batches
-    print(f"\n[Step 3/4] Analyzing Images with Gemini Vision AI (in batches of {batch_size})...")
-    print("=" * 70)
+    log(f"\n[Step 3/4] Analyzing Images with Gemini Vision AI (in batches of {batch_size})...")
+    log("=" * 70)
 
-    # Chunk images list into batch sizes
     image_batches = [images[i : i + batch_size] for i in range(0, total, batch_size)]
-
     processed_count = 0
-    for b_idx, current_batch in enumerate(image_batches, start=1):
-        print(f"\n--- Processing Batch {b_idx}/{len(image_batches)} ({len(current_batch)} images) ---")
 
-        # Query Gemini AI for batch of image slugs
-        slug_mapping = suggest_image_names_batch(current_batch, api_keys=api_keys)
+    for b_idx, current_batch in enumerate(image_batches, start=1):
+        log(f"\n--- Processing Batch {b_idx}/{len(image_batches)} ({len(current_batch)} images) ---")
+
+        if callable(progress_callback):
+            progress_callback({
+                "event": "batch_start",
+                "batch_idx": b_idx,
+                "total_batches": len(image_batches),
+                "batch_size": len(current_batch),
+                "processed_count": processed_count,
+                "total": total,
+            })
+
+        slug_mapping = suggest_image_names_batch(current_batch, api_keys=api_keys, log_callback=log_callback)
 
         for image_path in current_batch:
             processed_count += 1
             raw_slug = slug_mapping.get(image_path, image_path.stem)
 
-            # Apply word separator if not default
             if separator != "_":
                 raw_slug = raw_slug.replace("_", separator)
 
-            # Standardize extension and build base target name
             ext = normalize_extension(image_path.suffix)
             base_name = f"{prefix}{raw_slug}{suffix}"
 
-            # Collision Resolution
             candidate_name = f"{base_name}{ext}"
             counter = 1
             is_collision = False
@@ -215,40 +231,60 @@ def batch_rename_images(
             target_path = image_path.parent / candidate_name
 
             if is_collision:
-                print(f"  [{processed_count}/{total}] {image_path.name}  ==>  {candidate_name} (Collision resolved)")
+                log(f"  [{processed_count}/{total}] {image_path.name}  ==>  {candidate_name} (Collision resolved)")
             else:
-                print(f"  [{processed_count}/{total}] {image_path.name}  ==>  {candidate_name}")
+                log(f"  [{processed_count}/{total}] {image_path.name}  ==>  {candidate_name}")
 
             proposed_renames.append((image_path, target_path))
             mapping_data.append({"original": str(image_path), "target": str(target_path)})
 
-            # Perform disk rename immediately if live mode
             if not dry_run and image_path != target_path:
                 try:
                     image_path.rename(target_path)
                 except Exception as e:
-                    print(f"    [Error] Could not rename {image_path.name}: {e}")
+                    log(f"    [Error] Could not rename {image_path.name}: {e}")
 
-        # Update checkpoint audit log after each batch
+            if callable(progress_callback):
+                progress_callback({
+                    "event": "file_renamed",
+                    "original_name": image_path.name,
+                    "new_name": candidate_name,
+                    "is_collision": is_collision,
+                    "original_path": str(image_path),
+                    "target_path": str(target_path),
+                    "current": processed_count,
+                    "total": total,
+                    "dry_run": dry_run,
+                })
+
         if not dry_run:
             log_file.write_text(json.dumps(mapping_data, indent=2), encoding="utf-8")
 
-        # Pacing delay between batch API calls
         if b_idx < len(image_batches):
-            print("  • Pacing delay (4s) before next API batch request...")
-            time.sleep(4)
+            log(f"  • Pacing delay ({pacing_delay}s) before next API batch request...")
+            time.sleep(pacing_delay)
 
     # Step 4: Summary
-    print("\n" + "=" * 70)
+    log("\n" + "=" * 70)
     changed_count = sum(1 for src, dst in proposed_renames if src != dst)
-    print(f" Processing Complete: {total} photos analyzed, {changed_count} renamed.")
+    log(f" Processing Complete: {total} photos analyzed, {changed_count} renamed.")
 
     if dry_run:
-        print("\n [DRY RUN COMPLETE] No files were renamed on disk.")
+        log("\n [DRY RUN COMPLETE] No files were renamed on disk.")
     else:
-        print(f" Audit log saved to: {log_file}")
-        print(f" To undo this operation, run:\n   python rename.py --undo \"{log_file}\"")
-    print("=" * 70 + "\n")
+        log(f" Audit log saved to: {log_file}")
+        log(f" To undo this operation, run:\n   python rename.py --undo \"{log_file}\"")
+    log("=" * 70 + "\n")
+
+    return {
+        "total": total,
+        "renamed_count": changed_count,
+        "unchanged_count": total - changed_count,
+        "proposed_renames": proposed_renames,
+        "mapping_data": mapping_data,
+        "log_file": log_file,
+        "dry_run": dry_run,
+    }
 
 
 def main():
